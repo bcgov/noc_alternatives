@@ -1,0 +1,106 @@
+---
+title: "Alternative Occupations Index Based on Skill Similarity and Job Openings"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+runtime: shiny
+---
+
+```{r}
+library(tidyverse)
+library(DT)
+joined <- read_rds("joined.rds")
+noc_options <- unique(joined$origin)
+```
+
+Inputs {.sidebar data-width=370}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput(
+  "origin",
+  "Occupation:",
+  noc_options,
+  selected = "84110: Chain saw and skidder operators"
+)
+
+sliderInput("weight", "Index weight on skill similarity", .5, .95, .75, step = .01)
+```
+
+* In the table to the right, distance refers to the distance between the Occupation chosen above and various destination occupations.
+* This distance is based on 161 dimensions of ONET data: Skills, Abilities, Knowledge, Work Activities.
+* Distance metrics suffer from the curse of dimensionality:  In high dimensional space every point is approximately equidistant.
+* Fortunately, the first 5 principal components capture 85% of the variability.
+* We use the Manhattan distance metric on the above 5D projection of the ONET data.
+* Similarity is $e^\left(-\frac{distance}{max(distance)}\right)$, yielding a range of [0.3678794, 1]
+* We use the following function to re-scale job openings (jo) so demand has the same range: [0.3678794, 1]
+
+$$demand=e^{-1} + \frac{(jo - min(jo) * (1 - e^{-1})}{max(jo) - min(jo)}$$
+
+* It is not clear what is more important, job similarity or the amount of demand.
+* Thus we allow the user to choose the weight to put on similarity (higher weight, more important.)
+* We create the index using a cobb-douglas function: skill similarity and job openings are complementary in determining the best alternatives.
+
+
+
+
+
+```{r}
+#reactive elements--------------------------
+
+filtered <- reactive({
+  req(input$origin)
+  req(input$weight)
+  joined|>
+    filter(origin==input$origin)|>
+    mutate(index=similarity^input$weight*demand^(1-input$weight))|>
+    arrange(desc(index))|>
+    mutate(rank=row_number())
+})
+
+tenth_index <- reactive({
+   filtered()|>
+    filter(rank==10)|>
+    select(index)|>
+    pull()
+})
+
+isoquant_data <- reactive({
+  tibble(similarity=seq(from=exp(-1),to=1,length=1000),
+                        demand=(tenth_index()/(similarity^input$weight))^(1/(1-input$weight))
+                        )|>
+  filter(demand<=1.01 & demand>=exp(-1)-.01)
+})
+
+```
+ 
+Row
+-------------------------------------
+    
+### Plot: Top 10 alternatives to `r renderUI({input$origin})` (north east of isoquant)
+    
+```{r}
+plotly::renderPlotly({
+  ggplot()+
+  geom_point(data=filtered(), mapping=aes(similarity, demand, fill=index, label=destination), shape=21, colour="black", stroke=.5)+
+  geom_line(data=isoquant_data(), mapping=aes(similarity, demand))+
+  scale_fill_viridis_c()+
+  scale_x_continuous(limits = c(exp(-1), 1))+
+  scale_y_continuous(limits = c(exp(-1), 1))+ 
+  theme_minimal()+
+  labs(x="Skills similarity",
+       y="Rescaled Job Openings")
+})
+```
+    
+### Table: Top 10 alternatives to `r renderUI({input$origin})`
+
+```{r}
+renderDT({
+  filtered()|>
+    filter(rank<=10)|>
+    select(-origin, -rank)|>
+    datatable(rownames = FALSE)|>
+  formatRound(columns = 2:6, digits = 2)
+})
+```
